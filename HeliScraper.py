@@ -1,20 +1,23 @@
 import os
 import time
 import csv
-import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import undetected_chromedriver as uc
+import requests
 
 ##Currently saves urls and meta data of the images into a csv in the same folder as the file
 ##will update to save image files once the filter is better
 
 #CONFIG
-KEYWORDS = ['helicopter', 'heli', 'drone', 'uav', 'uas', 'rotorcraft', 'quadcopter']
+KEYWORDS = ['helicopter', 'heli', 'drone', 'drone aircraft',  'uav', 'UAV', 'uas', 'UAS', 'rotorcraft', 'quadcopter', 'unmanned aerial']
 OUTPUT_CSV = 'helicopter_drone_urls.csv'
+# Set to True to download images to a folder, False to just save URLs to CSV
+DOWNLOAD_IMAGES = False
+IMAGE_DOWNLOAD_FOLDER = 'downloaded_images'
 # How many gallery pages to scrape per site (increase for larger datasets)
 MAX_PAGES = 5
 # Seconds to wait between requests (be polite to servers)
@@ -27,13 +30,13 @@ def create_driver():
     options = uc.ChromeOptions()
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--no-sandbox")
-    # options.add_argument("--headless=new")  # uncomment after confirming it works
+    # options.add_argument("--headless=new")  # uncomment after confirming it works for headless scraping
     driver = uc.Chrome(options=options, version_main=147)
     return driver
 
 
 #LOGIN PLACEHOLDERS
-##hasn't been necessary yet but for scraping a lot of photos it may speed up the process
+##hasn't been necessary yet but for scraping a lot of photos at once it may speed up the process
 
 def login_airliners(driver):
     """
@@ -98,6 +101,23 @@ def dismiss_cookie_popup(driver):
     except Exception:
         pass  # no popup, move on
 
+def download_image(url, folder, filename):
+    try:
+        os.makedirs(folder, exist_ok=True)
+        if url.startswith('//'):
+            url = 'https:' + url
+        response = requests.get(url, timeout=10, headers={
+            'User-Agent': 'Mozilla/5.0'
+        })
+        if response.status_code == 200:
+            filepath = os.path.join(folder, filename)
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            return True
+    except Exception as e:
+        print(f"[ERROR] Failed to download {url}: {e}")
+    return False
+
 
 #AIRLINERS.NET SCRAPER
 
@@ -122,7 +142,7 @@ def scrape_airliners(driver, max_pages=MAX_PAGES):
                     EC.presence_of_element_located((By.CSS_SELECTOR, "img"))
                 )
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
-                images = soup.find_all('img')
+                images = soup.find_all('img', class_='lazy-load')
                 page_count = 0
 
                 for img in images:
@@ -164,10 +184,11 @@ def scrape_airliners(driver, max_pages=MAX_PAGES):
 
 
 #JETPHOTOS.COM SCRAPER
+#Jet photos seems to have a more specific search system so we may have to go in and put in individual drone model names to scrape images of them
 
 def scrape_jetphotos(driver, max_pages=MAX_PAGES):
     results = []
-    search_terms = ['helicopter', 'drone']
+    search_terms = ['helicopter', 'drone','quadcopter']
 
     for term in search_terms:
         print(f"[INFO] jetphotos.com — searching: '{term}'")
@@ -179,18 +200,17 @@ def scrape_jetphotos(driver, max_pages=MAX_PAGES):
                 driver.get(url)
             except Exception:
                 pass
-            time.sleep(3)
+            time.sleep(5)
 
-            # Only dismiss popup on first page
-            if page == 1:
-                dismiss_cookie_popup(driver)
+            
+            dismiss_cookie_popup(driver)
 
             try:
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "img"))
                 )
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
-                images = soup.find_all('img')
+                images = soup.find_all('img', class_='result__photo')
                 page_count = 0
 
                 for img in images:
@@ -198,6 +218,12 @@ def scrape_jetphotos(driver, max_pages=MAX_PAGES):
                     alt = img.get('alt') or ''
                     title = img.get('title') or ''
                     parent_text = img.parent.get_text(separator=' ', strip=True) if img.parent else ''
+
+                    # For drone search terms, filter by alt text
+                    if term in ['UAV', 'quadcopter', 'multirotor', 'drone aircraft', 'unmanned aerial']:
+                        drone_terms = ['uav', 'drone', 'quadcopter', 'multirotor', 'dji', 'phantom', 'mavic', 'inspire', 'autel', 'parrot', 'unmanned']
+                        if not any(t in alt.lower() for t in drone_terms):
+                            continue
 
                     if not src:
                         continue
@@ -289,9 +315,20 @@ def main():
 
         # Deduplicate and save
         all_results = deduplicate(all_results)
-        save_to_csv(all_results)
+        if DOWNLOAD_IMAGES:
+            print(f"[INFO] Downloading {len(all_results)} images...")
+            success = 0
+            for i, r in enumerate(all_results):
+                ext = r['image_url'].split('.')[-1].split('?')[0] or 'jpg'
+                filename = f"{r['source']}_{r['search_term']}_{i:04d}.{ext}"
+                folder = os.path.join(IMAGE_DOWNLOAD_FOLDER, r['search_term'])
+                if download_image(r['image_url'], folder, filename):
+                    success += 1
+            print(f"[INFO] Downloaded {success}/{len(all_results)} images to '{IMAGE_DOWNLOAD_FOLDER}/'")
+        else:
+            save_to_csv(all_results)
 
-        print(f"[INFO] Done. {len(all_results)} unique image URLs saved to '{OUTPUT_CSV}'")
+        print(f"[INFO] Done. {len(all_results)} unique images processed.")
 
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
